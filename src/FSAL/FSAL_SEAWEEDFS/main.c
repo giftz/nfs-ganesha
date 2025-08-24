@@ -121,6 +121,21 @@ static fsal_status_t seaweed_handle_getattrs(struct fsal_obj_handle *obj_hdl,
 					     struct fsal_attrlist *attrs_out);
 static fsal_status_t seaweed_handle_setattrs(struct fsal_obj_handle *obj_hdl,
 					     struct fsal_attrlist *attrs);
+static fsal_status_t seaweed_handle_open(struct fsal_obj_handle *obj_hdl,
+					 fsal_openflags_t openflags);
+static fsal_status_t seaweed_handle_close(struct fsal_obj_handle *obj_hdl);
+static fsal_status_t seaweed_handle_symlink(struct fsal_obj_handle *dir_hdl,
+					    const char *name,
+					    const char *link_path,
+					    struct fsal_attrlist *attrib,
+					    struct fsal_obj_handle **handle,
+					    struct fsal_attrlist *attrs_out);
+static fsal_status_t seaweed_handle_readlink(struct fsal_obj_handle *obj_hdl,
+					     struct gsh_buffdesc *link_content,
+					     bool refresh);
+static fsal_status_t seaweed_handle_link(struct fsal_obj_handle *obj_hdl,
+					 struct fsal_obj_handle *destdir_hdl,
+					 const char *name);
 
 /**
  * @brief SeaweedFS FSAL module operations
@@ -166,7 +181,12 @@ static struct fsal_obj_ops seaweed_handle_ops = {
 	.unlink = seaweed_handle_unlink,
 	.rename = seaweed_handle_rename,
 	.getattrs = seaweed_handle_getattrs,
-	.setattrs = seaweed_handle_setattrs
+	.setattrs = seaweed_handle_setattrs,
+	.open = seaweed_handle_open,
+	.close = seaweed_handle_close,
+	.symlink = seaweed_handle_symlink,
+	.readlink = seaweed_handle_readlink,
+	.link = seaweed_handle_link
 };
 
 /**
@@ -1511,6 +1531,279 @@ static fsal_status_t seaweed_handle_write(struct fsal_obj_handle *obj_hdl,
 
 	LogFullDebug(COMPONENT_FSAL, "SeaweedFS write successful: %zu bytes", *write_amount);
 	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+static fsal_status_t seaweed_handle_open(struct fsal_obj_handle *obj_hdl,
+					 fsal_openflags_t openflags)
+{
+	struct seaweed_fsal_obj_handle *seaweed_handle;
+
+	LogDebug(COMPONENT_FSAL, "SeaweedFS open: flags=0x%x", openflags);
+
+	if (!obj_hdl) {
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	seaweed_handle = container_of(obj_hdl, struct seaweed_fsal_obj_handle, obj_handle);
+
+	/* For MVP, we don't maintain explicit file state
+	 * In full implementation would:
+	 * 1. Check permissions
+	 * 2. Create file descriptor state
+	 * 3. Handle exclusive access if needed
+	 */
+
+	LogFullDebug(COMPONENT_FSAL, "SeaweedFS open successful: %s", 
+		     seaweed_handle->full_path ? seaweed_handle->full_path : "unknown");
+	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+static fsal_status_t seaweed_handle_close(struct fsal_obj_handle *obj_hdl)
+{
+	struct seaweed_fsal_obj_handle *seaweed_handle;
+
+	LogDebug(COMPONENT_FSAL, "SeaweedFS close");
+
+	if (!obj_hdl) {
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	seaweed_handle = container_of(obj_hdl, struct seaweed_fsal_obj_handle, obj_handle);
+
+	/* For MVP, we don't maintain explicit file state
+	 * In full implementation would:
+	 * 1. Clean up file descriptor state
+	 * 2. Flush any pending writes
+	 * 3. Release locks
+	 */
+
+	LogFullDebug(COMPONENT_FSAL, "SeaweedFS close successful: %s",
+		     seaweed_handle->full_path ? seaweed_handle->full_path : "unknown");
+	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+static fsal_status_t seaweed_handle_symlink(struct fsal_obj_handle *dir_hdl,
+					    const char *name,
+					    const char *link_path,
+					    struct fsal_attrlist *attrib,
+					    struct fsal_obj_handle **handle,
+					    struct fsal_attrlist *attrs_out)
+{
+	struct seaweed_fsal_obj_handle *parent_handle;
+	struct seaweed_fsal_obj_handle *new_handle;
+	struct seaweed_fsal_export *seaweed_export;
+	struct seaweed_filer_connection *conn;
+	struct seaweed_create_request req;
+	struct seaweed_create_response resp;
+	char full_path[SEAWEED_MAX_PATH];
+	fsal_status_t status;
+
+	LogDebug(COMPONENT_FSAL, "SeaweedFS symlink: %s -> %s", name, link_path);
+
+	if (!dir_hdl || !name || !link_path || !handle) {
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	parent_handle = container_of(dir_hdl, struct seaweed_fsal_obj_handle, obj_handle);
+	seaweed_export = container_of(dir_hdl->fsal, struct seaweed_fsal_export, export);
+
+	/* Build full path */
+	if (parent_handle->full_path && strcmp(parent_handle->full_path, "/") == 0) {
+		snprintf(full_path, sizeof(full_path), "/%s", name);
+	} else {
+		snprintf(full_path, sizeof(full_path), "%s/%s", 
+			 parent_handle->full_path ? parent_handle->full_path : "", name);
+	}
+
+	/* Get connection from pool */
+	conn = seaweed_get_connection(seaweed_export->seaweed_module);
+	if (!conn) {
+		LogMajor(COMPONENT_FSAL, "Failed to get SeaweedFS connection");
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Setup create request */
+	memset(&req, 0, sizeof(req));
+	memset(&resp, 0, sizeof(resp));
+	
+	strncpy(req.directory, parent_handle->full_path ? parent_handle->full_path : "/", 
+		sizeof(req.directory) - 1);
+	strncpy(req.entry.name, name, sizeof(req.entry.name) - 1);
+	
+	req.entry.type = SEAWEED_FILE_TYPE_SYMLINK;
+	req.o_excl = true;
+
+	/* Set attributes from request */
+	if (attrib) {
+		req.entry.attributes.file_mode = attrib->mode ? attrib->mode : (S_IFLNK | 0777);
+		req.entry.attributes.uid = attrib->owner ? attrib->owner : 0;
+		req.entry.attributes.gid = attrib->group ? attrib->group : 0;
+	} else {
+		req.entry.attributes.file_mode = S_IFLNK | 0777;
+		req.entry.attributes.uid = 0;
+		req.entry.attributes.gid = 0;
+	}
+	req.entry.attributes.file_size = strlen(link_path);
+	
+	/* Store symlink target in attributes */
+	strncpy(req.entry.attributes.symlink_target, link_path, 
+		sizeof(req.entry.attributes.symlink_target) - 1);
+
+	/* Perform create operation */
+	status = seaweed_filer_create_entry(conn, &req, &resp);
+	seaweed_put_connection(seaweed_export->seaweed_module, conn);
+
+	if (status != SEAWEED_OK) {
+		if (status == SEAWEED_ERROR_ALREADY_EXISTS) {
+			return fsalstat(ERR_FSAL_EXIST, EEXIST);
+		}
+		LogMajor(COMPONENT_FSAL, "SeaweedFS symlink failed: %s",
+			 seaweed_status_to_string(status));
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Create new handle */
+	new_handle = gsh_calloc(1, sizeof(struct seaweed_fsal_obj_handle));
+	if (!new_handle) {
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+	}
+
+	/* Initialize handle */
+	new_handle->full_path = gsh_strdup(full_path);
+	if (!new_handle->full_path) {
+		gsh_free(new_handle);
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+	}
+
+	/* Create filehandle */
+	status = seaweed_create_handle_from_path(full_path, &new_handle->seaweed_handle);
+	if (FSAL_IS_ERROR(status)) {
+		gsh_free(new_handle->full_path);
+		gsh_free(new_handle);
+		seaweed_free_entry(&resp.entry);
+		return status;
+	}
+
+	/* Add to path cache */
+	seaweed_add_to_path_cache(seaweed_export->seaweed_module,
+				  new_handle->seaweed_handle.path_hash, full_path);
+
+	/* Initialize FSAL handle */
+	fsal_obj_handle_init(&new_handle->obj_handle, &seaweed_export->export, SYMBOLIC_LINK);
+	new_handle->obj_handle.fsid = seaweed_export->export.fsid;
+	new_handle->obj_handle.fileid = resp.entry.attributes.inode;
+	new_handle->obj_handle.ops = &seaweed_handle_ops;
+
+	/* Fill attributes if requested */
+	if (attrs_out) {
+		seaweed_entry_to_attributes(&resp.entry, attrs_out);
+	}
+
+	*handle = &new_handle->obj_handle;
+
+	seaweed_free_entry(&resp.entry);
+
+	LogFullDebug(COMPONENT_FSAL, "SeaweedFS symlink successful: %s -> %s", name, link_path);
+	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+static fsal_status_t seaweed_handle_readlink(struct fsal_obj_handle *obj_hdl,
+					     struct gsh_buffdesc *link_content,
+					     bool refresh)
+{
+	struct seaweed_fsal_obj_handle *seaweed_handle;
+	struct seaweed_fsal_export *seaweed_export;
+	struct seaweed_filer_connection *conn;
+	struct seaweed_lookup_request req;
+	struct seaweed_lookup_response resp;
+	char *dir_path, *base_name;
+	char path_copy[SEAWEED_MAX_PATH];
+	fsal_status_t status;
+	size_t link_len;
+
+	LogDebug(COMPONENT_FSAL, "SeaweedFS readlink");
+
+	if (!obj_hdl || !link_content) {
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	seaweed_handle = container_of(obj_hdl, struct seaweed_fsal_obj_handle, obj_handle);
+	seaweed_export = container_of(obj_hdl->fsal, struct seaweed_fsal_export, export);
+
+	if (!seaweed_handle->full_path) {
+		LogMajor(COMPONENT_FSAL, "SeaweedFS handle missing full path");
+		return fsalstat(ERR_FSAL_SERVERFAULT, EFAULT);
+	}
+
+	/* Split path into directory and basename */
+	strncpy(path_copy, seaweed_handle->full_path, sizeof(path_copy) - 1);
+	path_copy[sizeof(path_copy) - 1] = '\0';
+	
+	dir_path = dirname(path_copy);
+	base_name = basename((char *)seaweed_handle->full_path);
+
+	/* Get connection from pool */
+	conn = seaweed_get_connection(seaweed_export->seaweed_module);
+	if (!conn) {
+		LogMajor(COMPONENT_FSAL, "Failed to get SeaweedFS connection");
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Setup lookup request */
+	memset(&req, 0, sizeof(req));
+	memset(&resp, 0, sizeof(resp));
+	
+	strncpy(req.directory, dir_path, sizeof(req.directory) - 1);
+	strncpy(req.name, base_name, sizeof(req.name) - 1);
+
+	/* Perform lookup to get symlink target */
+	status = seaweed_filer_lookup_entry(conn, &req, &resp);
+	seaweed_put_connection(seaweed_export->seaweed_module, conn);
+
+	if (status != SEAWEED_OK) {
+		if (status == SEAWEED_ERROR_NOT_FOUND) {
+			return fsalstat(ERR_FSAL_STALE, ESTALE);
+		}
+		LogMajor(COMPONENT_FSAL, "SeaweedFS readlink lookup failed: %s",
+			 seaweed_status_to_string(status));
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Check if it's actually a symlink */
+	if (resp.entry.type != SEAWEED_FILE_TYPE_SYMLINK) {
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	/* Copy symlink target to buffer */
+	link_len = strlen(resp.entry.attributes.symlink_target);
+	if (link_len >= link_content->len) {
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_TOOSMALL, ENOBUFS);
+	}
+
+	memcpy(link_content->addr, resp.entry.attributes.symlink_target, link_len);
+	link_content->len = link_len;
+
+	seaweed_free_entry(&resp.entry);
+
+	LogFullDebug(COMPONENT_FSAL, "SeaweedFS readlink successful: %s", 
+		     (char *)link_content->addr);
+	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+static fsal_status_t seaweed_handle_link(struct fsal_obj_handle *obj_hdl,
+					 struct fsal_obj_handle *destdir_hdl,
+					 const char *name)
+{
+	/* Hard links are not commonly supported in object stores like SeaweedFS
+	 * Return ENOTSUP for MVP implementation */
+	
+	LogDebug(COMPONENT_FSAL, "SeaweedFS link: %s (not supported in MVP)", name);
+	
+	return fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
 }
 
 /* Module entry points */
