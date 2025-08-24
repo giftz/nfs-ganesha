@@ -136,6 +136,11 @@ static fsal_status_t seaweed_handle_readlink(struct fsal_obj_handle *obj_hdl,
 static fsal_status_t seaweed_handle_link(struct fsal_obj_handle *obj_hdl,
 					 struct fsal_obj_handle *destdir_hdl,
 					 const char *name);
+static fsal_status_t seaweed_handle_lock_op(struct fsal_obj_handle *obj_hdl,
+					    void *p_owner,
+					    fsal_lock_op_t lock_op,
+					    fsal_lock_param_t *request_lock,
+					    fsal_lock_param_t *conflicting_lock);
 
 /**
  * @brief SeaweedFS FSAL module operations
@@ -186,7 +191,8 @@ static struct fsal_obj_ops seaweed_handle_ops = {
 	.close = seaweed_handle_close,
 	.symlink = seaweed_handle_symlink,
 	.readlink = seaweed_handle_readlink,
-	.link = seaweed_handle_link
+	.link = seaweed_handle_link,
+	.lock_op = seaweed_handle_lock_op
 };
 
 /**
@@ -1804,6 +1810,152 @@ static fsal_status_t seaweed_handle_link(struct fsal_obj_handle *obj_hdl,
 	LogDebug(COMPONENT_FSAL, "SeaweedFS link: %s (not supported in MVP)", name);
 	
 	return fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
+}
+
+static fsal_status_t seaweed_handle_lock_op(struct fsal_obj_handle *obj_hdl,
+					    void *p_owner,
+					    fsal_lock_op_t lock_op,
+					    fsal_lock_param_t *request_lock,
+					    fsal_lock_param_t *conflicting_lock)
+{
+	struct seaweed_fsal_obj_handle *seaweed_handle;
+	struct seaweed_fsal_export *seaweed_export;
+	struct seaweed_filer_connection *conn;
+	struct seaweed_lock_request req;
+	struct seaweed_lock_response resp;
+	struct seaweed_unlock_request unlock_req;
+	struct seaweed_unlock_response unlock_resp;
+	fsal_status_t status;
+	char owner_str[128];
+
+	if (!obj_hdl || !request_lock) {
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	seaweed_handle = container_of(obj_hdl, struct seaweed_fsal_obj_handle, obj_handle);
+	seaweed_export = container_of(obj_hdl->fsal, struct seaweed_fsal_export, export);
+
+	if (!seaweed_handle->full_path) {
+		LogMajor(COMPONENT_FSAL, "SeaweedFS handle missing full path");
+		return fsalstat(ERR_FSAL_SERVERFAULT, EFAULT);
+	}
+
+	/* Generate owner string from p_owner pointer */
+	snprintf(owner_str, sizeof(owner_str), "owner_%p", p_owner);
+
+	LogDebug(COMPONENT_FSAL, "SeaweedFS lock_op: op=%d, file=%s, owner=%s", 
+		 lock_op, seaweed_handle->full_path, owner_str);
+
+	/* Get connection from pool */
+	conn = seaweed_get_connection(seaweed_export->seaweed_module);
+	if (!conn) {
+		LogMajor(COMPONENT_FSAL, "Failed to get SeaweedFS connection");
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	switch (lock_op) {
+	case FSAL_OP_LOCKT:
+		/* Test lock - check if lock would conflict */
+		LogFullDebug(COMPONENT_FSAL, "SeaweedFS lock test operation");
+		
+		/* For MVP, we use a simple approach: try to acquire and immediately release */
+		memset(&req, 0, sizeof(req));
+		strncpy(req.name, seaweed_handle->full_path, sizeof(req.name) - 1);
+		req.seconds_to_lock = 1; /* Very short lock for testing */
+		strncpy(req.owner, owner_str, sizeof(req.owner) - 1);
+
+		status = seaweed_filer_lock(conn, &req, &resp);
+		
+		if (status == SEAWEED_OK) {
+			/* Lock succeeded, immediately release it */
+			memset(&unlock_req, 0, sizeof(unlock_req));
+			strncpy(unlock_req.name, seaweed_handle->full_path, sizeof(unlock_req.name) - 1);
+			strncpy(unlock_req.renew_token, resp.renew_token, sizeof(unlock_req.renew_token) - 1);
+			seaweed_filer_unlock(conn, &unlock_req, &unlock_resp);
+			
+			seaweed_put_connection(seaweed_export->seaweed_module, conn);
+			return fsalstat(ERR_FSAL_NO_ERROR, 0);
+		} else if (status == SEAWEED_ERROR_ALREADY_EXISTS) {
+			/* Lock is held by someone else */
+			if (conflicting_lock) {
+				conflicting_lock->lock_type = FSAL_LOCK_W; /* Assume write lock for simplicity */
+				conflicting_lock->lock_start = request_lock->lock_start;
+				conflicting_lock->lock_length = request_lock->lock_length;
+			}
+			seaweed_put_connection(seaweed_export->seaweed_module, conn);
+			return fsalstat(ERR_FSAL_LOCK_BLOCKED, EWOULDBLOCK);
+		} else {
+			LogMajor(COMPONENT_FSAL, "SeaweedFS lock test failed: %s",
+				 seaweed_status_to_string(status));
+			seaweed_put_connection(seaweed_export->seaweed_module, conn);
+			return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+		}
+		break;
+
+	case FSAL_OP_LOCK:
+		/* Acquire lock */
+		LogFullDebug(COMPONENT_FSAL, "SeaweedFS lock acquire operation");
+		
+		memset(&req, 0, sizeof(req));
+		strncpy(req.name, seaweed_handle->full_path, sizeof(req.name) - 1);
+		req.seconds_to_lock = 300; /* 5 minute default lock timeout */
+		strncpy(req.owner, owner_str, sizeof(req.owner) - 1);
+
+		status = seaweed_filer_lock(conn, &req, &resp);
+		seaweed_put_connection(seaweed_export->seaweed_module, conn);
+
+		if (status == SEAWEED_OK) {
+			LogFullDebug(COMPONENT_FSAL, "SeaweedFS lock acquired: %s", resp.renew_token);
+			return fsalstat(ERR_FSAL_NO_ERROR, 0);
+		} else if (status == SEAWEED_ERROR_ALREADY_EXISTS) {
+			if (conflicting_lock) {
+				conflicting_lock->lock_type = FSAL_LOCK_W;
+				conflicting_lock->lock_start = request_lock->lock_start;
+				conflicting_lock->lock_length = request_lock->lock_length;
+			}
+			return fsalstat(ERR_FSAL_LOCK_BLOCKED, EWOULDBLOCK);
+		} else {
+			LogMajor(COMPONENT_FSAL, "SeaweedFS lock acquire failed: %s",
+				 seaweed_status_to_string(status));
+			return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+		}
+		break;
+
+	case FSAL_OP_UNLOCK:
+		/* Release lock */
+		LogFullDebug(COMPONENT_FSAL, "SeaweedFS lock release operation");
+		
+		/* For MVP, we need to search for the lock by owner since we don't store tokens
+		 * In a full implementation, we would maintain a mapping of locks to tokens */
+		memset(&unlock_req, 0, sizeof(unlock_req));
+		strncpy(unlock_req.name, seaweed_handle->full_path, sizeof(unlock_req.name) - 1);
+		
+		/* Generate a token based on owner - this is a simplified approach */
+		snprintf(unlock_req.renew_token, sizeof(unlock_req.renew_token), 
+			 "token_%s_%s", owner_str, seaweed_handle->full_path);
+
+		status = seaweed_filer_unlock(conn, &unlock_req, &unlock_resp);
+		seaweed_put_connection(seaweed_export->seaweed_module, conn);
+
+		if (status == SEAWEED_OK) {
+			LogFullDebug(COMPONENT_FSAL, "SeaweedFS lock released successfully");
+			return fsalstat(ERR_FSAL_NO_ERROR, 0);
+		} else if (status == SEAWEED_ERROR_NOT_FOUND) {
+			/* Lock not found - might already be released */
+			LogDebug(COMPONENT_FSAL, "SeaweedFS lock not found for unlock (already released?)");
+			return fsalstat(ERR_FSAL_NO_ERROR, 0);
+		} else {
+			LogMajor(COMPONENT_FSAL, "SeaweedFS lock release failed: %s",
+				 seaweed_status_to_string(status));
+			return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+		}
+		break;
+
+	default:
+		LogMajor(COMPONENT_FSAL, "SeaweedFS unsupported lock operation: %d", lock_op);
+		seaweed_put_connection(seaweed_export->seaweed_module, conn);
+		return fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
+	}
 }
 
 /* Module entry points */

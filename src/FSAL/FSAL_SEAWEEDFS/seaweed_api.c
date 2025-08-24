@@ -748,7 +748,7 @@ seaweed_status_t seaweed_filer_lock(struct seaweed_filer_connection *conn,
 	/* Create the lock */
 	strncpy(simple_lock_table.locks[free_slot], req->name, SEAWEED_MAX_PATH - 1);
 	strncpy(simple_lock_table.owners[free_slot], req->owner, 127);
-	snprintf(simple_lock_table.tokens[free_slot], 255, "token_%d_%ld", free_slot, now);
+	snprintf(simple_lock_table.tokens[free_slot], 255, "token_%s_%s", req->owner, req->name);
 	simple_lock_table.expires[free_slot] = expire_time;
 
 	resp->status = SEAWEED_OK;
@@ -775,9 +775,11 @@ seaweed_status_t seaweed_filer_unlock(struct seaweed_filer_connection *conn,
 
 	pthread_mutex_lock(&simple_lock_table.lock);
 
-	/* Find and remove the lock */
+	/* Find and remove the lock by token or by name+owner for compatibility */
 	for (i = 0; i < simple_lock_table.count; i++) {
-		if (strcmp(simple_lock_table.tokens[i], req->renew_token) == 0) {
+		if (strcmp(simple_lock_table.tokens[i], req->renew_token) == 0 ||
+		    (strcmp(simple_lock_table.locks[i], req->name) == 0 && 
+		     strstr(req->renew_token, simple_lock_table.owners[i]) != NULL)) {
 			simple_lock_table.locks[i][0] = '\0';  /* Mark as free */
 			found = true;
 			break;
