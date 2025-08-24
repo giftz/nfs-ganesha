@@ -34,7 +34,7 @@
 #include "nfs_exports.h"
 #include "export_mgr.h"
 
-#include <libgen.h>		/* used for 'dirname' */
+#include <libgen.h>		/* used for 'dirname' and 'basename' */
 #include <pthread.h>
 #include <string.h>
 #include <sys/types.h>
@@ -114,7 +114,7 @@ struct fsal_ops seaweed_fsal_ops = {
  */
 static struct export_ops seaweed_export_ops = {
 	.release = seaweed_export_release,
-	.lookup_path = seaweed_handle_lookup,
+	.lookup_path = seaweed_export_lookup_path,
 	.fs_supports = seaweed_fs_supports,
 	.fs_maxfilesize = seaweed_fs_maxfilesize,
 	.fs_maxread = seaweed_fs_maxread,
@@ -321,6 +321,185 @@ static fsal_status_t seaweed_create_export(struct fsal_module *fsal_hdl,
 /* Export method implementations */
 
 /**
+ * @brief Export-level path lookup (for root lookups)
+ */
+static fsal_status_t seaweed_export_lookup_path(struct fsal_export *exp_hdl,
+						const char *path,
+						struct fsal_obj_handle **handle,
+						struct fsal_attrlist *attrs_out)
+{
+	struct seaweed_fsal_export *seaweed_export;
+	struct seaweed_fsal_obj_handle *new_handle;
+	struct seaweed_filer_connection *conn;
+	struct seaweed_lookup_request req;
+	struct seaweed_lookup_response resp;
+	fsal_status_t status;
+	char *dir_path, *base_name;
+	char path_copy[SEAWEED_MAX_PATH];
+
+	LogDebug(COMPONENT_FSAL, "SeaweedFS export lookup path: %s", path);
+
+	if (!exp_hdl || !path || !handle) {
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	seaweed_export = container_of(exp_hdl, struct seaweed_fsal_export, export);
+
+	/* Handle root directory specially */
+	if (strcmp(path, "/") == 0) {
+		/* Get connection from pool */
+		conn = seaweed_get_connection(seaweed_export->seaweed_module);
+		if (!conn) {
+			LogMajor(COMPONENT_FSAL, "Failed to get SeaweedFS connection");
+			return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+		}
+
+		/* Setup lookup request for root */
+		memset(&req, 0, sizeof(req));
+		memset(&resp, 0, sizeof(resp));
+		
+		strncpy(req.directory, "/", sizeof(req.directory) - 1);
+		strncpy(req.name, "/", sizeof(req.name) - 1);
+
+		/* Perform lookup */
+		status = seaweed_filer_lookup_entry(conn, &req, &resp);
+		seaweed_put_connection(seaweed_export->seaweed_module, conn);
+
+		if (status != SEAWEED_OK) {
+			LogMajor(COMPONENT_FSAL, "SeaweedFS root lookup failed: %s",
+				 seaweed_status_to_string(status));
+			return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+		}
+
+		/* Create root handle */
+		new_handle = gsh_calloc(1, sizeof(struct seaweed_fsal_obj_handle));
+		if (!new_handle) {
+			seaweed_free_entry(&resp.entry);
+			return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+		}
+
+		new_handle->full_path = gsh_strdup("/");
+		if (!new_handle->full_path) {
+			gsh_free(new_handle);
+			seaweed_free_entry(&resp.entry);
+			return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+		}
+
+		/* Create filehandle for root */
+		status = seaweed_create_handle_from_path("/", &new_handle->seaweed_handle);
+		if (FSAL_IS_ERROR(status)) {
+			gsh_free(new_handle->full_path);
+			gsh_free(new_handle);
+			seaweed_free_entry(&resp.entry);
+			return status;
+		}
+
+		/* Add root to path cache */
+		seaweed_add_to_path_cache(seaweed_export->seaweed_module,
+					  new_handle->seaweed_handle.path_hash, "/");
+
+		/* Initialize FSAL handle */
+		fsal_obj_handle_init(&new_handle->obj_handle, exp_hdl, DIRECTORY);
+		new_handle->obj_handle.fsid = exp_hdl->fsid;
+		new_handle->obj_handle.fileid = resp.entry.attributes.inode;
+		new_handle->obj_handle.ops = &seaweed_handle_ops;
+
+		/* Fill attributes if requested */
+		if (attrs_out) {
+			seaweed_entry_to_attributes(&resp.entry, attrs_out);
+		}
+
+		*handle = &new_handle->obj_handle;
+		seaweed_free_entry(&resp.entry);
+
+		LogFullDebug(COMPONENT_FSAL, "SeaweedFS root lookup successful");
+		return fsalstat(ERR_FSAL_NO_ERROR, 0);
+	}
+
+	/* For non-root paths, split into directory and basename */
+	strncpy(path_copy, path, sizeof(path_copy) - 1);
+	path_copy[sizeof(path_copy) - 1] = '\0';
+	
+	dir_path = dirname(path_copy);
+	base_name = basename((char *)path);
+
+	/* Get connection from pool */
+	conn = seaweed_get_connection(seaweed_export->seaweed_module);
+	if (!conn) {
+		LogMajor(COMPONENT_FSAL, "Failed to get SeaweedFS connection");
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Setup lookup request */
+	memset(&req, 0, sizeof(req));
+	memset(&resp, 0, sizeof(resp));
+	
+	strncpy(req.directory, dir_path, sizeof(req.directory) - 1);
+	strncpy(req.name, base_name, sizeof(req.name) - 1);
+
+	/* Perform lookup */
+	status = seaweed_filer_lookup_entry(conn, &req, &resp);
+	seaweed_put_connection(seaweed_export->seaweed_module, conn);
+
+	if (status != SEAWEED_OK) {
+		if (status == SEAWEED_ERROR_NOT_FOUND) {
+			return fsalstat(ERR_FSAL_NOENT, ENOENT);
+		}
+		LogMajor(COMPONENT_FSAL, "SeaweedFS lookup failed: %s",
+			 seaweed_status_to_string(status));
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Create new handle */
+	new_handle = gsh_calloc(1, sizeof(struct seaweed_fsal_obj_handle));
+	if (!new_handle) {
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+	}
+
+	/* Initialize handle */
+	new_handle->full_path = gsh_strdup(path);
+	if (!new_handle->full_path) {
+		gsh_free(new_handle);
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+	}
+
+	/* Create filehandle */
+	status = seaweed_create_handle_from_path(path, &new_handle->seaweed_handle);
+	if (FSAL_IS_ERROR(status)) {
+		gsh_free(new_handle->full_path);
+		gsh_free(new_handle);
+		seaweed_free_entry(&resp.entry);
+		return status;
+	}
+
+	/* Add to path cache */
+	seaweed_add_to_path_cache(seaweed_export->seaweed_module,
+				  new_handle->seaweed_handle.path_hash, path);
+
+	/* Initialize FSAL handle */
+	fsal_obj_handle_init(&new_handle->obj_handle, exp_hdl,
+			     (resp.entry.type == SEAWEED_FILE_TYPE_DIRECTORY) ? 
+			     DIRECTORY : REGULAR_FILE);
+	new_handle->obj_handle.fsid = exp_hdl->fsid;
+	new_handle->obj_handle.fileid = resp.entry.attributes.inode;
+	new_handle->obj_handle.ops = &seaweed_handle_ops;
+
+	/* Fill attributes if requested */
+	if (attrs_out) {
+		seaweed_entry_to_attributes(&resp.entry, attrs_out);
+	}
+
+	*handle = &new_handle->obj_handle;
+
+	seaweed_free_entry(&resp.entry);
+
+	LogFullDebug(COMPONENT_FSAL, "SeaweedFS export lookup successful: %s", path);
+	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+/**
  * @brief Release an export
  */
 static void seaweed_export_release(struct fsal_export *exp_hdl)
@@ -453,6 +632,64 @@ static uint32_t seaweed_fs_xattr_access_rights(struct fsal_export *exp_hdl)
 	return XATTR_RW; /* Allow read/write extended attributes */
 }
 
+/* Helper functions */
+
+/**
+ * @brief Convert SeaweedFS entry to FSAL attributes
+ */
+static void seaweed_entry_to_attributes(const struct seaweed_entry *entry,
+					struct fsal_attrlist *attrs)
+{
+	if (!entry || !attrs) {
+		return;
+	}
+
+	/* Clear all attributes first */
+	fsal_prepare_attrs(attrs, ATTR_TYPE | ATTR_SIZE | ATTR_FILEID | ATTR_MODE |
+			   ATTR_NUMLINKS | ATTR_OWNER | ATTR_GROUP |
+			   ATTR_ATIME | ATTR_MTIME | ATTR_CTIME | ATTR_CHANGE |
+			   ATTR_SPACEUSED);
+
+	/* Set file type */
+	switch (entry->type) {
+	case SEAWEED_FILE_TYPE_REGULAR:
+		attrs->type = REGULAR_FILE;
+		break;
+	case SEAWEED_FILE_TYPE_DIRECTORY:
+		attrs->type = DIRECTORY;
+		break;
+	case SEAWEED_FILE_TYPE_SYMLINK:
+		attrs->type = SYMBOLIC_LINK;
+		break;
+	default:
+		attrs->type = NO_FILE_TYPE;
+		break;
+	}
+
+	/* Set basic attributes */
+	attrs->filesize = entry->attributes.file_size;
+	attrs->fileid = entry->attributes.inode;
+	attrs->mode = entry->attributes.file_mode;
+	attrs->numlinks = entry->attributes.nlinks;
+	attrs->owner = entry->attributes.uid;
+	attrs->group = entry->attributes.gid;
+
+	/* Set timestamps */
+	attrs->atime.tv_sec = entry->attributes.mtime;
+	attrs->atime.tv_nsec = 0;
+	attrs->mtime.tv_sec = entry->attributes.mtime;
+	attrs->mtime.tv_nsec = 0;
+	attrs->ctime.tv_sec = entry->attributes.ctime;
+	attrs->ctime.tv_nsec = 0;
+	attrs->change = attrs->mtime;
+
+	/* Set space used */
+	attrs->spaceused = entry->attributes.file_size;
+
+	LogFullDebug(COMPONENT_FSAL, "Converted attributes: size=%lu, mode=%o, inode=%lu",
+		     attrs->filesize, attrs->mode, attrs->fileid);
+}
+
 /* Object handle method stubs (to be implemented) */
 
 static void seaweed_handle_release(struct fsal_obj_handle *obj_hdl)
@@ -473,9 +710,107 @@ static fsal_status_t seaweed_handle_lookup(struct fsal_obj_handle *parent,
 					   struct fsal_obj_handle **handle,
 					   struct fsal_attrlist *attrs_out)
 {
-	/* TODO: Implement lookup functionality */
+	struct seaweed_fsal_obj_handle *parent_handle;
+	struct seaweed_fsal_obj_handle *new_handle;
+	struct seaweed_fsal_export *seaweed_export;
+	struct seaweed_filer_connection *conn;
+	struct seaweed_lookup_request req;
+	struct seaweed_lookup_response resp;
+	char full_path[SEAWEED_MAX_PATH];
+	fsal_status_t status;
+
 	LogDebug(COMPONENT_FSAL, "SeaweedFS handle lookup: %s", path);
-	return fsalstat(ERR_FSAL_NOTSUPP, ENOSYS);
+
+	if (!parent || !path || !handle) {
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	parent_handle = container_of(parent, struct seaweed_fsal_obj_handle, obj_handle);
+	seaweed_export = container_of(parent->fsal, struct seaweed_fsal_export, export);
+
+	/* Build full path */
+	if (parent_handle->full_path && strcmp(parent_handle->full_path, "/") == 0) {
+		snprintf(full_path, sizeof(full_path), "/%s", path);
+	} else {
+		snprintf(full_path, sizeof(full_path), "%s/%s", 
+			 parent_handle->full_path ? parent_handle->full_path : "", path);
+	}
+
+	/* Get connection from pool */
+	conn = seaweed_get_connection(seaweed_export->seaweed_module);
+	if (!conn) {
+		LogMajor(COMPONENT_FSAL, "Failed to get SeaweedFS connection");
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Setup lookup request */
+	memset(&req, 0, sizeof(req));
+	memset(&resp, 0, sizeof(resp));
+	
+	strncpy(req.directory, parent_handle->full_path ? parent_handle->full_path : "/", 
+		sizeof(req.directory) - 1);
+	strncpy(req.name, path, sizeof(req.name) - 1);
+
+	/* Perform lookup */
+	status = seaweed_filer_lookup_entry(conn, &req, &resp);
+	seaweed_put_connection(seaweed_export->seaweed_module, conn);
+
+	if (status != SEAWEED_OK) {
+		if (status == SEAWEED_ERROR_NOT_FOUND) {
+			return fsalstat(ERR_FSAL_NOENT, ENOENT);
+		}
+		LogMajor(COMPONENT_FSAL, "SeaweedFS lookup failed: %s",
+			 seaweed_status_to_string(status));
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Create new handle */
+	new_handle = gsh_calloc(1, sizeof(struct seaweed_fsal_obj_handle));
+	if (!new_handle) {
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+	}
+
+	/* Initialize handle */
+	new_handle->full_path = gsh_strdup(full_path);
+	if (!new_handle->full_path) {
+		gsh_free(new_handle);
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+	}
+
+	/* Create filehandle */
+	status = seaweed_create_handle_from_path(full_path, &new_handle->seaweed_handle);
+	if (FSAL_IS_ERROR(status)) {
+		gsh_free(new_handle->full_path);
+		gsh_free(new_handle);
+		seaweed_free_entry(&resp.entry);
+		return status;
+	}
+
+	/* Add to path cache */
+	seaweed_add_to_path_cache(seaweed_export->seaweed_module,
+				  new_handle->seaweed_handle.path_hash, full_path);
+
+	/* Initialize FSAL handle */
+	fsal_obj_handle_init(&new_handle->obj_handle, &seaweed_export->export,
+			     (resp.entry.type == SEAWEED_FILE_TYPE_DIRECTORY) ? 
+			     DIRECTORY : REGULAR_FILE);
+	new_handle->obj_handle.fsid = seaweed_export->export.fsid;
+	new_handle->obj_handle.fileid = resp.entry.attributes.inode;
+	new_handle->obj_handle.ops = &seaweed_handle_ops;
+
+	/* Fill attributes if requested */
+	if (attrs_out) {
+		seaweed_entry_to_attributes(&resp.entry, attrs_out);
+	}
+
+	*handle = &new_handle->obj_handle;
+
+	seaweed_free_entry(&resp.entry);
+
+	LogFullDebug(COMPONENT_FSAL, "SeaweedFS lookup successful: %s", full_path);
+	return fsalstat(ERR_FSAL_NO_ERROR, 0);
 }
 
 static fsal_status_t seaweed_handle_readdir(struct fsal_obj_handle *dir_hdl,
@@ -485,9 +820,82 @@ static fsal_status_t seaweed_handle_readdir(struct fsal_obj_handle *dir_hdl,
 					    attrmask_t attrmask,
 					    bool *eof)
 {
-	/* TODO: Implement readdir functionality */
+	struct seaweed_fsal_obj_handle *seaweed_handle;
+	struct seaweed_fsal_export *seaweed_export;
+	struct seaweed_filer_connection *conn;
+	struct seaweed_list_request req;
+	struct seaweed_list_response resp;
+	struct seaweed_entry *entry;
+	struct fsal_attrlist attrs;
+	fsal_status_t status;
+	fsal_cookie_t cookie = 0;
+
 	LogDebug(COMPONENT_FSAL, "SeaweedFS handle readdir");
-	return fsalstat(ERR_FSAL_NOTSUPP, ENOSYS);
+
+	if (!dir_hdl || !cb || !eof) {
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	seaweed_handle = container_of(dir_hdl, struct seaweed_fsal_obj_handle, obj_handle);
+	seaweed_export = container_of(dir_hdl->fsal, struct seaweed_fsal_export, export);
+
+	/* Get connection from pool */
+	conn = seaweed_get_connection(seaweed_export->seaweed_module);
+	if (!conn) {
+		LogMajor(COMPONENT_FSAL, "Failed to get SeaweedFS connection");
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Setup list request */
+	memset(&req, 0, sizeof(req));
+	memset(&resp, 0, sizeof(resp));
+	
+	strncpy(req.directory, seaweed_handle->full_path ? seaweed_handle->full_path : "/", 
+		sizeof(req.directory) - 1);
+	req.limit = 1000;  /* Reasonable default */
+	req.inclusive_start = false;
+
+	/* If we have a starting point, use it */
+	if (whence && *whence != 0) {
+		/* For simplicity in MVP, we don't implement true pagination */
+		LogDebug(COMPONENT_FSAL, "Readdir with continuation not fully supported in MVP");
+	}
+
+	/* Perform list operation */
+	status = seaweed_filer_list_entries(conn, &req, &resp);
+	seaweed_put_connection(seaweed_export->seaweed_module, conn);
+
+	if (status != SEAWEED_OK) {
+		LogMajor(COMPONENT_FSAL, "SeaweedFS list failed: %s",
+			 seaweed_status_to_string(status));
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Process each entry */
+	entry = resp.entries;
+	while (entry) {
+		/* Prepare attributes for callback */
+		fsal_prepare_attrs(&attrs, attrmask);
+		seaweed_entry_to_attributes(entry, &attrs);
+
+		/* Call the callback */
+		if (!cb(entry->name, dir_hdl, &attrs, dir_state, cookie++)) {
+			LogDebug(COMPONENT_FSAL, "Readdir callback signaled stop");
+			break;
+		}
+
+		fsal_release_attrs(&attrs);
+		entry = entry->next;
+	}
+
+	/* Set end-of-file status */
+	*eof = !resp.has_more;
+
+	/* Clean up response */
+	seaweed_free_list_response(&resp);
+
+	LogFullDebug(COMPONENT_FSAL, "SeaweedFS readdir completed: %d entries", resp.count);
+	return fsalstat(ERR_FSAL_NO_ERROR, 0);
 }
 
 static fsal_status_t seaweed_handle_create(struct fsal_obj_handle *dir_hdl,
@@ -496,9 +904,121 @@ static fsal_status_t seaweed_handle_create(struct fsal_obj_handle *dir_hdl,
 					   struct fsal_obj_handle **handle,
 					   struct fsal_attrlist *attrs_out)
 {
-	/* TODO: Implement create functionality */
+	struct seaweed_fsal_obj_handle *parent_handle;
+	struct seaweed_fsal_obj_handle *new_handle;
+	struct seaweed_fsal_export *seaweed_export;
+	struct seaweed_filer_connection *conn;
+	struct seaweed_create_request req;
+	struct seaweed_create_response resp;
+	char full_path[SEAWEED_MAX_PATH];
+	fsal_status_t status;
+
 	LogDebug(COMPONENT_FSAL, "SeaweedFS handle create: %s", name);
-	return fsalstat(ERR_FSAL_NOTSUPP, ENOSYS);
+
+	if (!dir_hdl || !name || !handle) {
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	parent_handle = container_of(dir_hdl, struct seaweed_fsal_obj_handle, obj_handle);
+	seaweed_export = container_of(dir_hdl->fsal, struct seaweed_fsal_export, export);
+
+	/* Build full path */
+	if (parent_handle->full_path && strcmp(parent_handle->full_path, "/") == 0) {
+		snprintf(full_path, sizeof(full_path), "/%s", name);
+	} else {
+		snprintf(full_path, sizeof(full_path), "%s/%s", 
+			 parent_handle->full_path ? parent_handle->full_path : "", name);
+	}
+
+	/* Get connection from pool */
+	conn = seaweed_get_connection(seaweed_export->seaweed_module);
+	if (!conn) {
+		LogMajor(COMPONENT_FSAL, "Failed to get SeaweedFS connection");
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Setup create request */
+	memset(&req, 0, sizeof(req));
+	memset(&resp, 0, sizeof(resp));
+	
+	strncpy(req.directory, parent_handle->full_path ? parent_handle->full_path : "/", 
+		sizeof(req.directory) - 1);
+	strncpy(req.entry.name, name, sizeof(req.entry.name) - 1);
+	
+	req.entry.type = SEAWEED_FILE_TYPE_REGULAR;
+	req.o_excl = true;  /* Default to exclusive creation */
+
+	/* Set attributes from request */
+	if (attrib) {
+		req.entry.attributes.file_mode = attrib->mode ? attrib->mode : (S_IFREG | 0644);
+		req.entry.attributes.uid = attrib->owner ? attrib->owner : 0;
+		req.entry.attributes.gid = attrib->group ? attrib->group : 0;
+		req.entry.attributes.file_size = 0;
+	} else {
+		req.entry.attributes.file_mode = S_IFREG | 0644;
+		req.entry.attributes.uid = 0;
+		req.entry.attributes.gid = 0;
+		req.entry.attributes.file_size = 0;
+	}
+
+	/* Perform create operation */
+	status = seaweed_filer_create_entry(conn, &req, &resp);
+	seaweed_put_connection(seaweed_export->seaweed_module, conn);
+
+	if (status != SEAWEED_OK) {
+		if (status == SEAWEED_ERROR_ALREADY_EXISTS) {
+			return fsalstat(ERR_FSAL_EXIST, EEXIST);
+		}
+		LogMajor(COMPONENT_FSAL, "SeaweedFS create failed: %s",
+			 seaweed_status_to_string(status));
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Create new handle */
+	new_handle = gsh_calloc(1, sizeof(struct seaweed_fsal_obj_handle));
+	if (!new_handle) {
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+	}
+
+	/* Initialize handle */
+	new_handle->full_path = gsh_strdup(full_path);
+	if (!new_handle->full_path) {
+		gsh_free(new_handle);
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+	}
+
+	/* Create filehandle */
+	status = seaweed_create_handle_from_path(full_path, &new_handle->seaweed_handle);
+	if (FSAL_IS_ERROR(status)) {
+		gsh_free(new_handle->full_path);
+		gsh_free(new_handle);
+		seaweed_free_entry(&resp.entry);
+		return status;
+	}
+
+	/* Add to path cache */
+	seaweed_add_to_path_cache(seaweed_export->seaweed_module,
+				  new_handle->seaweed_handle.path_hash, full_path);
+
+	/* Initialize FSAL handle */
+	fsal_obj_handle_init(&new_handle->obj_handle, &seaweed_export->export, REGULAR_FILE);
+	new_handle->obj_handle.fsid = seaweed_export->export.fsid;
+	new_handle->obj_handle.fileid = resp.entry.attributes.inode;
+	new_handle->obj_handle.ops = &seaweed_handle_ops;
+
+	/* Fill attributes if requested */
+	if (attrs_out) {
+		seaweed_entry_to_attributes(&resp.entry, attrs_out);
+	}
+
+	*handle = &new_handle->obj_handle;
+
+	seaweed_free_entry(&resp.entry);
+
+	LogFullDebug(COMPONENT_FSAL, "SeaweedFS create successful: %s", full_path);
+	return fsalstat(ERR_FSAL_NO_ERROR, 0);
 }
 
 static fsal_status_t seaweed_handle_mkdir(struct fsal_obj_handle *dir_hdl,
@@ -507,9 +1027,121 @@ static fsal_status_t seaweed_handle_mkdir(struct fsal_obj_handle *dir_hdl,
 					  struct fsal_obj_handle **handle,
 					  struct fsal_attrlist *attrs_out)
 {
-	/* TODO: Implement mkdir functionality */
+	struct seaweed_fsal_obj_handle *parent_handle;
+	struct seaweed_fsal_obj_handle *new_handle;
+	struct seaweed_fsal_export *seaweed_export;
+	struct seaweed_filer_connection *conn;
+	struct seaweed_create_request req;
+	struct seaweed_create_response resp;
+	char full_path[SEAWEED_MAX_PATH];
+	fsal_status_t status;
+
 	LogDebug(COMPONENT_FSAL, "SeaweedFS handle mkdir: %s", name);
-	return fsalstat(ERR_FSAL_NOTSUPP, ENOSYS);
+
+	if (!dir_hdl || !name || !handle) {
+		return fsalstat(ERR_FSAL_INVAL, EINVAL);
+	}
+
+	parent_handle = container_of(dir_hdl, struct seaweed_fsal_obj_handle, obj_handle);
+	seaweed_export = container_of(dir_hdl->fsal, struct seaweed_fsal_export, export);
+
+	/* Build full path */
+	if (parent_handle->full_path && strcmp(parent_handle->full_path, "/") == 0) {
+		snprintf(full_path, sizeof(full_path), "/%s", name);
+	} else {
+		snprintf(full_path, sizeof(full_path), "%s/%s", 
+			 parent_handle->full_path ? parent_handle->full_path : "", name);
+	}
+
+	/* Get connection from pool */
+	conn = seaweed_get_connection(seaweed_export->seaweed_module);
+	if (!conn) {
+		LogMajor(COMPONENT_FSAL, "Failed to get SeaweedFS connection");
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Setup create request */
+	memset(&req, 0, sizeof(req));
+	memset(&resp, 0, sizeof(resp));
+	
+	strncpy(req.directory, parent_handle->full_path ? parent_handle->full_path : "/", 
+		sizeof(req.directory) - 1);
+	strncpy(req.entry.name, name, sizeof(req.entry.name) - 1);
+	
+	req.entry.type = SEAWEED_FILE_TYPE_DIRECTORY;
+	req.o_excl = true;  /* Default to exclusive creation */
+
+	/* Set attributes from request */
+	if (attrib) {
+		req.entry.attributes.file_mode = attrib->mode ? attrib->mode : (S_IFDIR | 0755);
+		req.entry.attributes.uid = attrib->owner ? attrib->owner : 0;
+		req.entry.attributes.gid = attrib->group ? attrib->group : 0;
+		req.entry.attributes.file_size = 4096;  /* Standard directory size */
+	} else {
+		req.entry.attributes.file_mode = S_IFDIR | 0755;
+		req.entry.attributes.uid = 0;
+		req.entry.attributes.gid = 0;
+		req.entry.attributes.file_size = 4096;
+	}
+
+	/* Perform create operation */
+	status = seaweed_filer_create_entry(conn, &req, &resp);
+	seaweed_put_connection(seaweed_export->seaweed_module, conn);
+
+	if (status != SEAWEED_OK) {
+		if (status == SEAWEED_ERROR_ALREADY_EXISTS) {
+			return fsalstat(ERR_FSAL_EXIST, EEXIST);
+		}
+		LogMajor(COMPONENT_FSAL, "SeaweedFS mkdir failed: %s",
+			 seaweed_status_to_string(status));
+		return fsalstat(ERR_FSAL_SERVERFAULT, EIO);
+	}
+
+	/* Create new handle */
+	new_handle = gsh_calloc(1, sizeof(struct seaweed_fsal_obj_handle));
+	if (!new_handle) {
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+	}
+
+	/* Initialize handle */
+	new_handle->full_path = gsh_strdup(full_path);
+	if (!new_handle->full_path) {
+		gsh_free(new_handle);
+		seaweed_free_entry(&resp.entry);
+		return fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+	}
+
+	/* Create filehandle */
+	status = seaweed_create_handle_from_path(full_path, &new_handle->seaweed_handle);
+	if (FSAL_IS_ERROR(status)) {
+		gsh_free(new_handle->full_path);
+		gsh_free(new_handle);
+		seaweed_free_entry(&resp.entry);
+		return status;
+	}
+
+	/* Add to path cache */
+	seaweed_add_to_path_cache(seaweed_export->seaweed_module,
+				  new_handle->seaweed_handle.path_hash, full_path);
+
+	/* Initialize FSAL handle */
+	fsal_obj_handle_init(&new_handle->obj_handle, &seaweed_export->export, DIRECTORY);
+	new_handle->obj_handle.fsid = seaweed_export->export.fsid;
+	new_handle->obj_handle.fileid = resp.entry.attributes.inode;
+	new_handle->obj_handle.ops = &seaweed_handle_ops;
+
+	/* Fill attributes if requested */
+	if (attrs_out) {
+		seaweed_entry_to_attributes(&resp.entry, attrs_out);
+	}
+
+	*handle = &new_handle->obj_handle;
+
+	seaweed_free_entry(&resp.entry);
+
+	LogFullDebug(COMPONENT_FSAL, "SeaweedFS mkdir successful: %s", full_path);
+	return fsalstat(ERR_FSAL_NO_ERROR, 0);
 }
 
 /* Module entry points */
