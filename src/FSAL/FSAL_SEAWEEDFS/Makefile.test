@@ -1,0 +1,41 @@
+# Simple Makefile for SeaweedFS FSAL MVP testing
+# This is a standalone test build, separate from the main NFS-Ganesha build
+
+CC = gcc
+CFLAGS = -Wall -Wextra -std=c99 -g -O0 -I. -DSEAWEED_MVP_TEST
+LDFLAGS = -lpthread -lm
+
+# Test target
+TEST_TARGET = test_seaweed_mvp
+TEST_SOURCES = test_seaweed_mvp.c seaweed_api.c
+TEST_OBJECTS = $(TEST_SOURCES:.c=.o)
+
+# Build rules
+all: $(TEST_TARGET)
+
+$(TEST_TARGET): $(TEST_OBJECTS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Run tests
+test: $(TEST_TARGET)
+	@echo "Running SeaweedFS FSAL MVP tests..."
+	./$(TEST_TARGET)
+
+# Clean up
+clean:
+	rm -f $(TEST_OBJECTS) $(TEST_TARGET)
+
+# Help
+help:
+	@echo "SeaweedFS FSAL MVP Test Makefile"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all     - Build the test executable"
+	@echo "  test    - Build and run all tests"
+	@echo "  clean   - Remove build artifacts"
+	@echo "  help    - Show this help message"
+
+.PHONY: all test clean help

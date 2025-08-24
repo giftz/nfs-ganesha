@@ -25,6 +25,41 @@
  * @brief SeaweedFS Filer API implementation (MVP stub version)
  */
 
+#ifdef SEAWEED_MVP_TEST
+/* Test mode includes */
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include "seaweed_api.h"
+/* Mock gsh_free and gsh_calloc for testing */
+#define gsh_free(ptr) free(ptr)
+#define gsh_calloc(count, size) calloc(count, size)
+/* Mock logging for testing */
+#define LogFullDebug(component, format, ...) printf("DEBUG: " format "\n", ##__VA_ARGS__)
+#define LogDebug(component, format, ...) printf("DEBUG: " format "\n", ##__VA_ARGS__)
+#define COMPONENT_FSAL 0
+/* Add unused parameter macro */
+#define UNUSED(x) ((void)(x))
+/* File type constants for test mode */
+#ifndef S_IFDIR
+#define S_IFDIR  0040000
+#endif
+#ifndef S_IFREG
+#define S_IFREG  0100000
+#endif
+#ifndef S_IFLNK
+#define S_IFLNK  0120000
+#endif
+#else
+/* NFS-Ganesha mode includes */
 #include "config.h"
 #include "fsal.h"
 #include "fsal_seaweed.h"
@@ -34,6 +69,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/stat.h>
+#endif
 
 /* Mock data for MVP implementation */
 struct mock_file_entry {
@@ -297,9 +333,17 @@ seaweed_status_t seaweed_filer_lookup_entry(struct seaweed_filer_connection *con
 	char full_path[SEAWEED_MAX_PATH];
 	struct mock_file_entry *entry;
 
-	if (!conn || !req || !resp) {
+	if (!req || !resp) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+	
+#ifndef SEAWEED_MVP_TEST
+	if (!conn) {
+		return SEAWEED_ERROR_INVALID_ARGUMENT;
+	}
+#else
+	UNUSED(conn);
+#endif
 
 	LogFullDebug(COMPONENT_FSAL, "SeaweedFS lookup: %s/%s", req->directory, req->name);
 
@@ -309,7 +353,11 @@ seaweed_status_t seaweed_filer_lookup_entry(struct seaweed_filer_connection *con
 
 	/* Build full path */
 	if (strcmp(req->directory, "/") == 0) {
-		snprintf(full_path, sizeof(full_path), "/%s", req->name);
+		if (strcmp(req->name, "/") == 0) {
+			strcpy(full_path, "/");  /* Special case: root lookup */
+		} else {
+			snprintf(full_path, sizeof(full_path), "/%s", req->name);
+		}
 	} else {
 		snprintf(full_path, sizeof(full_path), "%s/%s", req->directory, req->name);
 	}
@@ -341,9 +389,15 @@ seaweed_status_t seaweed_filer_create_entry(struct seaweed_filer_connection *con
 	struct seaweed_entry new_entry;
 	time_t now = time(NULL);
 
-	if (!conn || !req || !resp) {
+	if (!req || !resp) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+	
+#ifndef SEAWEED_MVP_TEST
+	if (!conn) {
+		return SEAWEED_ERROR_INVALID_ARGUMENT;
+	}
+#endif
 
 	LogDebug(COMPONENT_FSAL, "SeaweedFS create: %s/%s", req->directory, req->entry.name);
 
@@ -410,9 +464,15 @@ seaweed_status_t seaweed_filer_list_entries(struct seaweed_filer_connection *con
 	char dir_with_slash[SEAWEED_MAX_PATH];
 	size_t dir_len;
 
-	if (!conn || !req || !resp) {
+	if (!req || !resp) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+	
+#ifndef SEAWEED_MVP_TEST
+	if (!conn) {
+		return SEAWEED_ERROR_INVALID_ARGUMENT;
+	}
+#endif
 
 	LogFullDebug(COMPONENT_FSAL, "SeaweedFS list: %s", req->directory);
 
@@ -520,9 +580,15 @@ seaweed_status_t seaweed_filer_delete_entry(struct seaweed_filer_connection *con
 {
 	char full_path[SEAWEED_MAX_PATH];
 
-	if (!conn || !req || !resp) {
+	if (!req || !resp) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+	
+#ifndef SEAWEED_MVP_TEST
+	if (!conn) {
+		return SEAWEED_ERROR_INVALID_ARGUMENT;
+	}
+#endif
 
 	LogDebug(COMPONENT_FSAL, "SeaweedFS delete: %s/%s", req->directory, req->name);
 
@@ -553,9 +619,15 @@ seaweed_status_t seaweed_filer_rename_entry(struct seaweed_filer_connection *con
 	char new_path[SEAWEED_MAX_PATH];
 	struct mock_file_entry *entry;
 
-	if (!conn || !req || !resp) {
+	if (!req || !resp) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+	
+#ifndef SEAWEED_MVP_TEST
+	if (!conn) {
+		return SEAWEED_ERROR_INVALID_ARGUMENT;
+	}
+#endif
 
 	LogDebug(COMPONENT_FSAL, "SeaweedFS rename: %s/%s -> %s/%s", 
 		 req->old_directory, req->old_name, req->new_directory, req->new_name);
@@ -611,9 +683,15 @@ seaweed_status_t seaweed_filer_update_entry(struct seaweed_filer_connection *con
 	char full_path[SEAWEED_MAX_PATH];
 	struct mock_file_entry *entry;
 
-	if (!conn || !req || !resp) {
+	if (!req || !resp) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+	
+#ifndef SEAWEED_MVP_TEST
+	if (!conn) {
+		return SEAWEED_ERROR_INVALID_ARGUMENT;
+	}
+#endif
 
 	LogFullDebug(COMPONENT_FSAL, "SeaweedFS update: %s/%s", req->directory, req->entry.name);
 
@@ -659,9 +737,15 @@ seaweed_status_t seaweed_filer_assign_volume(struct seaweed_filer_connection *co
 	static uint32_t next_volume_id = 1;
 	static uint64_t next_needle_id = 1000;
 
-	if (!conn || !req || !resp) {
+	if (!req || !resp) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+	
+#ifndef SEAWEED_MVP_TEST
+	if (!conn) {
+		return SEAWEED_ERROR_INVALID_ARGUMENT;
+	}
+#endif
 
 	/* Mock volume assignment */
 	snprintf(resp->file_id, sizeof(resp->file_id), "%u,%lu,%u",
@@ -704,9 +788,15 @@ seaweed_status_t seaweed_filer_lock(struct seaweed_filer_connection *conn,
 	time_t expire_time = now + req->seconds_to_lock;
 	int i, free_slot = -1;
 
-	if (!conn || !req || !resp) {
+	if (!req || !resp) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+	
+#ifndef SEAWEED_MVP_TEST
+	if (!conn) {
+		return SEAWEED_ERROR_INVALID_ARGUMENT;
+	}
+#endif
 
 	pthread_mutex_lock(&simple_lock_table.lock);
 
@@ -769,9 +859,15 @@ seaweed_status_t seaweed_filer_unlock(struct seaweed_filer_connection *conn,
 	int i;
 	bool found = false;
 
-	if (!conn || !req || !resp) {
+	if (!req || !resp) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+	
+#ifndef SEAWEED_MVP_TEST
+	if (!conn) {
+		return SEAWEED_ERROR_INVALID_ARGUMENT;
+	}
+#endif
 
 	pthread_mutex_lock(&simple_lock_table.lock);
 
@@ -802,6 +898,11 @@ seaweed_status_t seaweed_volume_write(const struct seaweed_location *location,
 				      const void *data, size_t size,
 				      const char *auth_token)
 {
+#ifdef SEAWEED_MVP_TEST
+	UNUSED(location);
+	UNUSED(data);
+	UNUSED(auth_token);
+#endif
 	/* For MVP, we simulate successful write operations */
 	LogFullDebug(COMPONENT_FSAL, "SeaweedFS volume write: %s (%zu bytes)", 
 		     file_id, size);
@@ -813,6 +914,9 @@ seaweed_status_t seaweed_volume_read(const struct seaweed_location *location,
 				     uint64_t offset, size_t size,
 				     void *buffer, size_t *bytes_read)
 {
+#ifdef SEAWEED_MVP_TEST
+	UNUSED(location);
+#endif
 	/* For MVP, we simulate read operations with dummy data */
 	if (buffer && bytes_read) {
 		*bytes_read = (size > 1024) ? 1024 : size;  /* Simulate partial read */
@@ -828,6 +932,10 @@ seaweed_status_t seaweed_volume_delete(const struct seaweed_location *location,
 				       const char *file_id,
 				       const char *auth_token)
 {
+#ifdef SEAWEED_MVP_TEST
+	UNUSED(location);
+	UNUSED(auth_token);
+#endif
 	/* For MVP, we simulate successful delete operations */
 	LogFullDebug(COMPONENT_FSAL, "SeaweedFS volume delete: %s", file_id);
 	return SEAWEED_OK;
