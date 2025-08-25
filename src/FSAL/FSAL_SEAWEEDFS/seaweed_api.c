@@ -356,10 +356,20 @@ seaweed_status_t seaweed_filer_lookup_entry(struct seaweed_filer_connection *con
 		if (strcmp(req->name, "/") == 0) {
 			strcpy(full_path, "/");  /* Special case: root lookup */
 		} else {
-			snprintf(full_path, sizeof(full_path), "/%s", req->name);
+			int ret = snprintf(full_path, sizeof(full_path), "/%s", req->name);
+			if (ret >= (int)sizeof(full_path)) {
+				resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+				pthread_mutex_unlock(&mock_fs_lock);
+				return resp->status;
+			}
 		}
 	} else {
-		snprintf(full_path, sizeof(full_path), "%s/%s", req->directory, req->name);
+		int ret = snprintf(full_path, sizeof(full_path), "%s/%s", req->directory, req->name);
+		if (ret >= (int)sizeof(full_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	}
 
 	entry = find_mock_entry(full_path);
@@ -397,6 +407,8 @@ seaweed_status_t seaweed_filer_create_entry(struct seaweed_filer_connection *con
 	if (!conn) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+#else
+	UNUSED(conn);
 #endif
 
 	LogDebug(COMPONENT_FSAL, "SeaweedFS create: %s/%s", req->directory, req->entry.name);
@@ -407,9 +419,19 @@ seaweed_status_t seaweed_filer_create_entry(struct seaweed_filer_connection *con
 
 	/* Build full path */
 	if (strcmp(req->directory, "/") == 0) {
-		snprintf(full_path, sizeof(full_path), "/%s", req->entry.name);
+		int ret = snprintf(full_path, sizeof(full_path), "/%s", req->entry.name);
+		if (ret >= (int)sizeof(full_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	} else {
-		snprintf(full_path, sizeof(full_path), "%s/%s", req->directory, req->entry.name);
+		int ret = snprintf(full_path, sizeof(full_path), "%s/%s", req->directory, req->entry.name);
+		if (ret >= (int)sizeof(full_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	}
 
 	/* Check if already exists (for O_EXCL) */
@@ -472,6 +494,8 @@ seaweed_status_t seaweed_filer_list_entries(struct seaweed_filer_connection *con
 	if (!conn) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+#else
+	UNUSED(conn);
 #endif
 
 	LogFullDebug(COMPONENT_FSAL, "SeaweedFS list: %s", req->directory);
@@ -588,6 +612,8 @@ seaweed_status_t seaweed_filer_delete_entry(struct seaweed_filer_connection *con
 	if (!conn) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+#else
+	UNUSED(conn);
 #endif
 
 	LogDebug(COMPONENT_FSAL, "SeaweedFS delete: %s/%s", req->directory, req->name);
@@ -596,9 +622,19 @@ seaweed_status_t seaweed_filer_delete_entry(struct seaweed_filer_connection *con
 
 	/* Build full path */
 	if (strcmp(req->directory, "/") == 0) {
-		snprintf(full_path, sizeof(full_path), "/%s", req->name);
+		int ret = snprintf(full_path, sizeof(full_path), "/%s", req->name);
+		if (ret >= (int)sizeof(full_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	} else {
-		snprintf(full_path, sizeof(full_path), "%s/%s", req->directory, req->name);
+		int ret = snprintf(full_path, sizeof(full_path), "%s/%s", req->directory, req->name);
+		if (ret >= (int)sizeof(full_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	}
 
 	resp->status = remove_mock_entry(full_path);
@@ -627,6 +663,8 @@ seaweed_status_t seaweed_filer_rename_entry(struct seaweed_filer_connection *con
 	if (!conn) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+#else
+	UNUSED(conn);
 #endif
 
 	LogDebug(COMPONENT_FSAL, "SeaweedFS rename: %s/%s -> %s/%s", 
@@ -636,15 +674,35 @@ seaweed_status_t seaweed_filer_rename_entry(struct seaweed_filer_connection *con
 
 	/* Build paths */
 	if (strcmp(req->old_directory, "/") == 0) {
-		snprintf(old_path, sizeof(old_path), "/%s", req->old_name);
+		int ret = snprintf(old_path, sizeof(old_path), "/%s", req->old_name);
+		if (ret >= (int)sizeof(old_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	} else {
-		snprintf(old_path, sizeof(old_path), "%s/%s", req->old_directory, req->old_name);
+		int ret = snprintf(old_path, sizeof(old_path), "%s/%s", req->old_directory, req->old_name);
+		if (ret >= (int)sizeof(old_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	}
 
 	if (strcmp(req->new_directory, "/") == 0) {
-		snprintf(new_path, sizeof(new_path), "/%s", req->new_name);
+		int ret = snprintf(new_path, sizeof(new_path), "/%s", req->new_name);
+		if (ret >= (int)sizeof(new_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	} else {
-		snprintf(new_path, sizeof(new_path), "%s/%s", req->new_directory, req->new_name);
+		int ret = snprintf(new_path, sizeof(new_path), "%s/%s", req->new_directory, req->new_name);
+		if (ret >= (int)sizeof(new_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	}
 
 	/* Find old entry */
@@ -691,6 +749,8 @@ seaweed_status_t seaweed_filer_update_entry(struct seaweed_filer_connection *con
 	if (!conn) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+#else
+	UNUSED(conn);
 #endif
 
 	LogFullDebug(COMPONENT_FSAL, "SeaweedFS update: %s/%s", req->directory, req->entry.name);
@@ -699,9 +759,19 @@ seaweed_status_t seaweed_filer_update_entry(struct seaweed_filer_connection *con
 
 	/* Build full path */
 	if (strcmp(req->directory, "/") == 0) {
-		snprintf(full_path, sizeof(full_path), "/%s", req->entry.name);
+		int ret = snprintf(full_path, sizeof(full_path), "/%s", req->entry.name);
+		if (ret >= (int)sizeof(full_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	} else {
-		snprintf(full_path, sizeof(full_path), "%s/%s", req->directory, req->entry.name);
+		int ret = snprintf(full_path, sizeof(full_path), "%s/%s", req->directory, req->entry.name);
+		if (ret >= (int)sizeof(full_path)) {
+			resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+			pthread_mutex_unlock(&mock_fs_lock);
+			return resp->status;
+		}
 	}
 
 	entry = find_mock_entry(full_path);
@@ -745,6 +815,8 @@ seaweed_status_t seaweed_filer_assign_volume(struct seaweed_filer_connection *co
 	if (!conn) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+#else
+	UNUSED(conn);
 #endif
 
 	/* Mock volume assignment */
@@ -796,6 +868,8 @@ seaweed_status_t seaweed_filer_lock(struct seaweed_filer_connection *conn,
 	if (!conn) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+#else
+	UNUSED(conn);
 #endif
 
 	pthread_mutex_lock(&simple_lock_table.lock);
@@ -838,7 +912,12 @@ seaweed_status_t seaweed_filer_lock(struct seaweed_filer_connection *conn,
 	/* Create the lock */
 	strncpy(simple_lock_table.locks[free_slot], req->name, SEAWEED_MAX_PATH - 1);
 	strncpy(simple_lock_table.owners[free_slot], req->owner, 127);
-	snprintf(simple_lock_table.tokens[free_slot], 255, "token_%s_%s", req->owner, req->name);
+	int ret = snprintf(simple_lock_table.tokens[free_slot], 255, "token_%s_%s", req->owner, req->name);
+	if (ret >= 255) {
+		resp->status = SEAWEED_ERROR_INVALID_ARGUMENT;
+		pthread_mutex_unlock(&simple_lock_table.lock);
+		return resp->status;
+	}
 	simple_lock_table.expires[free_slot] = expire_time;
 
 	resp->status = SEAWEED_OK;
@@ -867,6 +946,8 @@ seaweed_status_t seaweed_filer_unlock(struct seaweed_filer_connection *conn,
 	if (!conn) {
 		return SEAWEED_ERROR_INVALID_ARGUMENT;
 	}
+#else
+	UNUSED(conn);
 #endif
 
 	pthread_mutex_lock(&simple_lock_table.lock);
