@@ -32,39 +32,39 @@ endif(USE_FSAL_VFS OR USE_FSAL_LUSTRE OR USE_FSAL_XFS)
 # All we need to do here is control the
 # build of chosen fsals
 if(USE_FSAL_PROXY_V4)
-  add_subdirectory(FSAL_PROXY_V4)
+    #add_subdirectory(FSAL_PROXY_V4)
 endif(USE_FSAL_PROXY_V4)
 
 if(USE_FSAL_PROXY_V3)
-  add_subdirectory(FSAL_PROXY_V3)
+    #add_subdirectory(FSAL_PROXY_V3)
 endif(USE_FSAL_PROXY_V3)
 
 if(USE_FSAL_CEPH)
-  add_subdirectory(FSAL_CEPH)
+    #add_subdirectory(FSAL_CEPH)
 endif(USE_FSAL_CEPH)
 
 if(USE_FSAL_RGW)
-  add_subdirectory(FSAL_RGW)
+    #add_subdirectory(FSAL_RGW)
 endif(USE_FSAL_RGW)
 
 if(USE_FSAL_SAUNAFS)
-  add_subdirectory(FSAL_SAUNAFS)
+    #add_subdirectory(FSAL_SAUNAFS)
 endif(USE_FSAL_SAUNAFS)
 
 if(USE_FSAL_GPFS)
-  add_subdirectory(FSAL_GPFS)
+    #add_subdirectory(FSAL_GPFS)
 endif(USE_FSAL_GPFS)
 
 if(USE_FSAL_GLUSTER)
-  add_subdirectory(FSAL_GLUSTER)
+    #add_subdirectory(FSAL_GLUSTER)
 endif(USE_FSAL_GLUSTER)
 
 if(USE_FSAL_LIZARDFS)
-  add_subdirectory(FSAL_LIZARDFS)
+    #add_subdirectory(FSAL_LIZARDFS)
 endif(USE_FSAL_LIZARDFS)
 
 if(USE_FSAL_KVSFS)
-  add_subdirectory(FSAL_KVSFS)
+    #add_subdirectory(FSAL_KVSFS)
 endif(USE_FSAL_KVSFS)
 
 if(USE_FSAL_MEM)

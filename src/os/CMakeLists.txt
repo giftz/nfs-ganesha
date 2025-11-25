@@ -53,4 +53,6 @@ add_dependencies(gos gsh_trace_header_generate)
 include("${CMAKE_BINARY_DIR}/gsh_lttng_generation_file_properties.cmake")
 endif (USE_LTTNG)
 
+target_link_libraries(gos PRIVATE acl)
+
 ########### install files ###############

@@ -1,0 +1,46 @@
+# Makefile for SeaweedFS FSAL Phase 8 Real API Testing
+# This tests the actual HTTP API integration (not MVP mode)
+
+CC = gcc
+CFLAGS = -Wall -Wextra -std=c99 -g -O0 -I.
+LDFLAGS = -lpthread -lm -lcurl
+
+# Real API test target
+REAL_TEST_TARGET = test_real_api
+REAL_TEST_SOURCES = test_real_api.c seaweed_api.c
+REAL_TEST_OBJECTS = $(REAL_TEST_SOURCES:.c=.o)
+
+# Build rules
+all: $(REAL_TEST_TARGET)
+
+$(REAL_TEST_TARGET): $(REAL_TEST_OBJECTS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Run real API tests
+test: $(REAL_TEST_TARGET)
+	@echo "Running SeaweedFS FSAL Phase 8 real API tests..."
+	@echo "Note: This requires a running SeaweedFS instance at 127.0.0.1:8333"
+	./$(REAL_TEST_TARGET)
+
+# Clean up
+clean:
+	rm -f $(REAL_TEST_OBJECTS) $(REAL_TEST_TARGET)
+
+# Help
+help:
+	@echo "SeaweedFS FSAL Phase 8 Real API Test Makefile"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all     - Build the real API test executable"
+	@echo "  test    - Build and run real API tests (requires running SeaweedFS)"
+	@echo "  clean   - Remove build artifacts"
+	@echo "  help    - Show this help message"
+	@echo ""
+	@echo "Requirements:"
+	@echo "  - SeaweedFS running at 127.0.0.1:8333 (use docker-compose up)"
+	@echo "  - libcurl4-openssl-dev installed"
+
+.PHONY: all test clean help
